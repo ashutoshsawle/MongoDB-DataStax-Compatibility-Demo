@@ -74,7 +74,7 @@ def switch_database():
         data = request.get_json()
         new_db_type = data.get('database_type')
         
-        if new_db_type not in ['mongodb', 'hcd']:
+        if new_db_type not in ['mongodb', 'hcd', 'astra']:
             return jsonify({'success': False, 'message': 'Invalid database type'})
         
         # Update .env file

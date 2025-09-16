@@ -20,8 +20,28 @@ class DatabaseManager:
             self._setup_mongodb()
         elif self.db_type == 'hcd':
             self._setup_hcd()
+        elif self.db_type == 'astra':
+            self._setup_astra()
         else:
             raise ValueError(f"Unsupported database type: {self.db_type}")
+    def _setup_astra(self):
+        """Setup Astra DB connection"""
+        astra_db_id = os.getenv('ASTRA_DB_ID')
+        astra_region = os.getenv('ASTRA_DB_REGION')
+        astra_token = os.getenv('ASTRA_DB_TOKEN')
+        astra_keyspace = os.getenv('ASTRA_DB_KEYSPACE', 'default_keyspace')
+
+        if not all([astra_db_id, astra_region, astra_token]):
+            raise ValueError("Astra DB configuration incomplete. Check ASTRA_DB_ID, ASTRA_DB_REGION, and ASTRA_DB_TOKEN")
+
+        from astrapy import AstraDB
+        self.client = AstraDB(
+            astra_db_id,
+            astra_region,
+            astra_token,
+            namespace=astra_keyspace
+        )
+        self.collection = self.client.collection("users")
     
     def _setup_mongodb(self):
         """Setup MongoDB connection"""
@@ -94,41 +114,49 @@ class DatabaseManager:
             return {"success": False, "message": "Sync only available from MongoDB"}
         
         try:
-            # Get all users from current MongoDB collection
-            mongodb_users = list(self.collection.find({}))
-            
-            if not mongodb_users:
-                return {"success": True, "message": "No users to sync", "synced_count": 0}
-            
+            # Use a cursor to process users in batches
+            batch_size = 100
+            cursor = self.collection.find({})
+            total_synced = 0
+            errors = []
+            batch = []
+
             # Setup HCD connection temporarily
             hcd_manager = DatabaseManager()
             hcd_manager.db_type = 'hcd'
             hcd_manager._setup_hcd()
-            
-            synced_count = 0
-            errors = []
-            
-            for user in mongodb_users:
+
+            for user in cursor:
+                batch.append(user)
+                if len(batch) == batch_size:
+                    try:
+                        hcd_manager.collection.insert_many(batch)
+                        total_synced += len(batch)
+                    except Exception as e:
+                        for b_user in batch:
+                            errors.append(f"User {b_user.get('_id', 'unknown')}: {str(e)}")
+                    batch = []
+
+            # Process any remaining users in the last batch
+            if batch:
                 try:
-                    # Insert user into HCD as-is (no transformation)
-                    hcd_manager.collection.insert_one(user)
-                    synced_count += 1
+                    hcd_manager.collection.insert_many(batch)
+                    total_synced += len(batch)
                 except Exception as e:
-                    # Skip if user already exists or other errors
-                    errors.append(f"User {user.get('_id', 'unknown')}: {str(e)}")
-                    continue
-            
-            message = f"Successfully synced {synced_count} users to DataStax HCD"
+                    for b_user in batch:
+                        errors.append(f"User {b_user.get('_id', 'unknown')}: {str(e)}")
+
+            message = f"Successfully synced {total_synced} users to DataStax HCD"
             if errors:
                 message += f". {len(errors)} users skipped (likely duplicates)"
-            
+
             return {
-                "success": True, 
+                "success": True,
                 "message": message,
-                "synced_count": synced_count,
+                "synced_count": total_synced,
                 "errors": errors[:5]  # Return first 5 errors only
             }
-            
+
         except Exception as e:
             return {"success": False, "message": f"Sync failed: {str(e)}"}
     
